@@ -1,5 +1,6 @@
 from botasaurus.browser import browser, Driver
 from botasaurus.soupify import soupify
+from botasaurus.user_agent import UserAgent
 import pandas as pd
 import time
 from requests.exceptions import HTTPError
@@ -7,8 +8,12 @@ from datetime import datetime
 from tqdm import tqdm
 import random
 import re
+import os
+import sys
 
-@browser(create_error_logs=True, headless=False, block_images=False)
+@browser(create_error_logs=True, headless=False, block_images=False, parallel=1,
+            user_agent=UserAgent.RANDOM,
+)
 def scrape_sub_subcategories(driver: Driver, suc: str) -> list:
     """Main function to scrape product data from a list of sub-subcategories."""
     categories_df = load_categories("categories/sub_sub_categorias.xlsx")
@@ -17,6 +22,7 @@ def scrape_sub_subcategories(driver: Driver, suc: str) -> list:
     # Utilizar tqdm para ver el progreso
     for _, row in tqdm(categories_df.iterrows(), total=len(categories_df), desc="Scraping categories"):
         base_url, category_data = prepare_category(row, suc)
+        base_url = base_url.replace("cotodigital3", "cotodigital").replace("browse", "categoria")
         products += paginate_products(driver, base_url, category_data, suc)
 
     return products
@@ -37,6 +43,21 @@ def prepare_category(row, suc) -> tuple:
     }
     return base_url, category_data
 
+class SuppressOutput:
+    def __enter__(self):
+        # Redirigir stdout y stderr a /dev/null (en Windows, es nul)
+        self._original_stdout = sys.stdout
+        self._original_stderr = sys.stderr
+        sys.stdout = open(os.devnull, 'w')
+        sys.stderr = open(os.devnull, 'w')
+        
+    def __exit__(self, exc_type, exc_value, traceback):
+        # Restaurar stdout y stderr
+        sys.stdout.close()
+        sys.stderr.close()
+        sys.stdout = self._original_stdout
+        sys.stderr = self._original_stderr
+
 
 def paginate_products(driver: Driver, base_url: str, category_data: dict, suc:str) -> list:
     """Paginates through the product listings for a given category and scrapes data."""
@@ -45,19 +66,12 @@ def paginate_products(driver: Driver, base_url: str, category_data: dict, suc:st
         current_url = base_url + str(offset)
         soup = request_page(driver, current_url)
 
-        if soup is None:
-            print(f"Skipping category {
-                  category_data['sub_subcategory']} due to errors.")
-            break
-
-        product_elements = soup.select('li[id^="li_prod"]')
+        product_elements = soup.select('.producto-card')
         if not product_elements:
-            # print(f"No more products (offset={offset}) for category {
-            #       category_data['sub_subcategory']}. Ending scraping.")
             break
 
         products += extract_product_data(product_elements,
-                                         current_url, category_data, suc)
+                                        current_url, category_data, suc)
 
         if not more_products_available(soup):
             break
@@ -66,28 +80,32 @@ def paginate_products(driver: Driver, base_url: str, category_data: dict, suc:st
 
     return products
 
-# Make HTTP requests and handle errors
-
-
 def request_page(driver: Driver, url: str):
     """Handles HTTP requests with retry logic for a given URL."""
     attempts, max_attempts = 0, 2
+    block_wait_time = 1800  # Tiempo inicial de espera en segundos (30 minutos)
+    random_sleep_min, random_sleep_max = 80, 90  # Límites iniciales para el random sleep en segundos
+
     while attempts < max_attempts:
         try:
             driver.get(url)
-            page_text = driver.select("*", wait=1.5)
-            driver.scroll(by=random.uniform(900, 1200))
-            # driver.sleep(random.uniform(1, 5))
-            soup = soupify(page_text)
+            # page_text = driver.select("*", wait=1.5)
+            # Ajuste del tiempo de espera aleatorio
+            with SuppressOutput(): # para evitar que printee en la consola
+                driver.sleep(random.uniform(random_sleep_min, random_sleep_max))
+            driver.click_at_point(100, 200)
+            driver.scroll(by=random.uniform(1500, 2500), wait=5)
+            driver.scroll_to_bottom(smooth_scroll=True, wait=3)
+            soup = soupify(driver.page_html)
 
             if "Web Page Blocked" in soup.text:
-                print("Blocked, waiting 30 minutes...")
-                time.sleep(1800)  # Wait 30 minutes
+                print(f"Blocked, waiting {block_wait_time // 60} minutes... {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}")
+                time.sleep(block_wait_time)
+                block_wait_time += 900  # Incrementar 15 minutos (900 segundos)
+                random_sleep_min += 15  # Incrementar el mínimo de random sleep
+                random_sleep_max += 15  # Incrementar el máximo de random sleep
                 attempts += 1
                 continue
-            
-            # driver.humane_click('span.atg_store_newPrice')
-            # driver.humane_click('span.atg_store_newPrice')
 
             return soup
 
@@ -99,67 +117,70 @@ def request_page(driver: Driver, url: str):
     print(f"Max attempts reached for URL: {url}")
     return None
 
-# Extract product data from the page
 
-
-def extract_product_data(product_elements, current_url: str, category_data: dict, suc:str) -> list:
+def extract_product_data(product_elements, current_url: str, category_data: dict, suc: str) -> list:
     """Extracts and returns product information from a list of HTML elements."""
     products = []
     scrape_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for product in product_elements:
-        # Obtener el precio usando la primera clase
-        store_price = get_text_from_element(product, 'span', 'atg_store_productPrice')
-        
-        if not store_price:
-            store_price = get_text_from_element(product, 'span', 'price_regular_precio')
-
-        # Crear el diccionario con la información del producto
+        # Extraer datos del producto
         product_info = {
             'store_id': suc,
-            'product_id': product.get('id'),
+            'product_id': None,  # No hay un id único en el HTML
             'original_url': current_url,
-            'product_url': get_product_url(product),
-            'description': get_text_from_element(product, 'div', 'descrip_full'),
-            'unit_price': get_text_from_element(product, 'span', 'unit'),
-            'store_price': store_price, 
-            'new_price': get_text_from_element(product, 'span', 'atg_store_newPrice'),
-            "scrap_time": scrape_time,
+            'product_url': get_product_url(product, suc),  # Usamos la URL de la imagen como referencia
+            'description': get_text_from_element(product, 'h5', 'nombre-producto'),
+            'unit_price': get_unit_price(product),
+            'store_price': get_text_from_element(product, 'small', 'card-text'),
+            'new_price': get_text_from_element(product, 'h4', 'card-title'),
+            'scrap_time': scrape_time,
             **category_data
         }
-
-        # Añadir el producto a la lista de productos
         products.append(product_info)
 
     return products
 
-# Helper to check if there are more products to paginate
 
-
-def more_products_available(soup) -> bool:
-    """Checks if more products are available based on the results count."""
-    results_count = int(soup.find('span', id='resultsCount').text)
-    return results_count > 1000
-
-# Get product URL
-
-
-def get_product_url(product) -> str:
-    """Extracts the product URL from the HTML element."""
-    product_link = product.find('a', href=True)
-    if product_link:
-        return f"https://www.cotodigital3.com.ar{product_link['href']}"
+def get_product_url(product, suc:str) -> str:
+    """Constructs the product URL from the image URL."""
+    image_element = product.select_one('img.product-image')
+    if image_element:
+        # Extraer el identificador del producto desde la URL de la imagen
+        image_url = image_element.get('src')
+        match = re.search(r'/(\d{8})\.', image_url)  # Buscar un patrón numérico de 8 dígitos
+        if match:
+            product_id = match.group(1)
+            # Construir la URL del producto
+            return f"https://www.cotodigital.com.ar/sitios/cdigi/productos/{product_id}/_/R-{product_id}-{product_id}-{suc}"
     return None
 
-# Get text from an element by tag and class
+
+
+def get_unit_price(product) -> str:
+    """Extracts the unit price from the product element."""
+    unit_price_element = product.find('small', string=lambda text: "Precio por" in text if text else False)
+    if unit_price_element:
+        return unit_price_element.text.strip()
+    return None
 
 
 def get_text_from_element(product, tag: str, class_name: str) -> str:
     """Extracts and returns text content from an HTML element."""
-    element = product.find(tag, class_=class_name)
+    element = product.select_one(f"{tag}.{class_name}")
     if element:
         return element.text.strip()
     return None
+
+def more_products_available(soup) -> bool:
+    """Checks if more products are available based on the results count."""
+    results_text = soup.find('strong', class_='d-block py-2')
+    if results_text:
+        match = re.search(r'\d+', results_text.text)  # Extraer solo los números
+        if match:
+            results_count = int(match.group())
+            return results_count > 1000
+    return False
 
 def extract_measure_price(text):
     if pd.isna(text):
@@ -172,9 +193,14 @@ def extract_measure_price(text):
         return pd.Series([unit_measure, float(unit_final_price)])
     return pd.Series([None, None])
 
+def clean_unit_price(value):
+    if isinstance(value, str):
+        return re.sub(r'\s+', ' ', value).strip()
+    return value  # Dejar el valor sin cambios si no es una cadena
+
 def clean_df(prices_df:pd.DataFrame):
     
-    prices_df["unit_price"] = prices_df["unit_price"].apply(lambda x: re.sub(r'\s+', ' ', x).strip())
+    prices_df["unit_price"] = prices_df["unit_price"].apply(clean_unit_price)
     # Aplicar la función a la columna 'unit_price' para crear nuevas columnas
     prices_df[['unit_measure', 'unit_final_price']] = prices_df['unit_price'].apply(extract_measure_price)
     unit_mapping = {

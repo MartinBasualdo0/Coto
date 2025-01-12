@@ -1,3 +1,7 @@
+### NO USAR ##
+### NO USAR ##
+### NO USAR ##
+
 import pandas as pd
 # from botasaurus import AntiDetectRequests
 from bs4 import BeautifulSoup
@@ -7,16 +11,16 @@ from botasaurus.soupify import soupify
 
 # URLs y solicitud inicial
 BASE_URL = "https://www.cotodigital3.com.ar"
-LINK = f"{BASE_URL}/sitios/cdigi/"
+LINK = f"{BASE_URL}/sitios/cdigi/nuevositio"
 
 
-@browser(create_error_logs=True, headless=False, block_images_and_css=True)
+@browser(create_error_logs=True, headless=False, block_images_and_css=False)
 def fetch_page_content(driver: Driver, url):
     """
     Realiza una solicitud GET a la URL dada utilizando botasaurus con anti-detección.
     """
     driver.get(url)
-    html = driver.select("*", wait=1.5)
+    html = driver.select(driver.page_html)
     soup = soupify(html)
     with open("coto_content_categories.html", 'w', encoding='utf-8') as f:
         f.write(str(soup.prettify()))  # Guarda el contenido HTML con formato

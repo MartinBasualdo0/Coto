@@ -1,1 +1,3 @@
 *.ipynb
+coto_prices.parquet
+*.pyc
